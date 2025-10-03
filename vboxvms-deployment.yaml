@@ -58,7 +58,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet # Required for hostNetwork
       containers:
       - name: vboxvms-operator
-        image: italovalcy/vboxvms-k8s-ctrl:v1
+        image: italovalcy/vboxvms-k8s-ctrl:latest
         imagePullPolicy: Always
         securityContext:
           privileged: true
