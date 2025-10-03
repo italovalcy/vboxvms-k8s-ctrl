@@ -3,5 +3,4 @@ kind: VirtualboxVM
 metadata:
   name: test123
 spec:
-  replicas: 3
-  image: nginx:latest
+  image: debian12:latest

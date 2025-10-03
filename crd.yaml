@@ -20,8 +20,6 @@ spec:
             spec:
               type: object
               properties:
-                replicas:
-                  type: integer
                 image:
                   type: string
                 ip:
@@ -29,8 +27,14 @@ spec:
               x-kubernetes-preserve-unknown-fields: true
             status:
               type: object
+              properties:
+                phase:
+                  type: string
               x-kubernetes-preserve-unknown-fields: true
       additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
         - name: IP
           type: string
           jsonPath: .spec.ip

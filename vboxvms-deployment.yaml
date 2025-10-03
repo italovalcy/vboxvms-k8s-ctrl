@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vboxvms-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vboxvms-clusterrole
+rules:
+- apiGroups: ["amlight.net"]
+  resources: ["vboxvms"]
+  verbs: ["get", "list", "watch", "patch"]
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["", "events.k8s.io"] # Include both for compatibility
+  resources: ["events"]
+  verbs: ["create"]
+#- apiGroups: [""]
+#  resources: ["pods"]
+#  verbs: ["get", "list", "delete"]
+#- apiGroups: [""]
+#  resources: ["configmaps"]
+#  verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vboxvms-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vboxvms-clusterrole
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: vboxvms-operator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vboxvms-operator
+  namespace: vboxvms-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vboxvms-operator
+  template:
+    metadata:
+      labels:
+        app: vboxvms-operator
+      #annotations:
+      #  container.apparmor.security.beta.kubernetes.io/vboxvms-operator: unconfined
+    spec:
+      hostNetwork: true # Enable host networking
+      dnsPolicy: ClusterFirstWithHostNet # Required for hostNetwork
+      containers:
+      - name: vboxvms-operator
+        image: italovalcy/vboxvms-k8s-ctrl:v1
+        imagePullPolicy: Always
+        securityContext:
+          privileged: true
+          appArmorProfile:
+            type: Unconfined
+        env:
+        - name: VBOXVMSCTL_TEMPLATES_DIR
+          value: /app/vboxvmsctl-templates
+        volumeMounts:
+        - name: dev-vboxdrv
+          mountPath: /dev/vboxdrv
+        - name: dev-vboxdrvu
+          mountPath: /dev/vboxdrvu
+        - name: dev-vboxnetctl
+          mountPath: /dev/vboxnetctl
+        - name: virtualbox-vms
+          mountPath: "/app/vboxvmsctl-templates"
+          #mountPath: "/app/VirtualBox VMs"
+        #- name: lib-modules
+        #  mountPath: /lib/modules
+      volumes:
+      - name: dev-vboxdrv
+        hostPath:
+          path: /dev/vboxdrv
+          type: CharDevice
+      - name: dev-vboxdrvu
+        hostPath:
+          path: /dev/vboxdrvu
+          type: CharDevice
+      - name: dev-vboxnetctl
+        hostPath:
+          path: /dev/vboxnetctl
+          type: CharDevice
+      - name: virtualbox-vms
+        hostPath:
+          path: "/home/amlight/VirtualBox VMs"
+          type: Directory
+      #- name: lib-modules
+      #  hostPath:
+      #    path: /lib/modules
+      #    type: Directory
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values: ["k8s-testing"]
