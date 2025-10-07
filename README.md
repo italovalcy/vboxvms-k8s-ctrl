@@ -19,9 +19,9 @@ kubectl --kubeconfig ~/.kube/config-admin apply -f crd.yaml
 kubectl --kubeconfig ~/.kube/config-admin apply -f vboxvms-deployment.yaml
 ```
 
-Next you have to adjust your RBAC permissions for your users to allow creation of VBoxVMs resources. Here is an example (please adjust your service account name and namespace accordingly -- here we use service account as `ns-admin` and namespace as `amlight`):
+Next you have to adjust your RBAC permissions for your users to allow creation of VBoxVMs resources. This has to be done **for each user** on **each namespace** you want to allow access to VBoxVMs resource! Here is an example (please adjust your service account name and namespace accordingly -- here we use service account as `ns-admin` and namespace as `amlight`):
 ```
-sed -e "s/XXXYOUR_SAXXX/ns-admin/g; s/XXXYOUR_NAMESPACEXXX/amlight/g" | kubectl --kubeconfig ~/.kube/config-admin apply -f -
+sed -e "s/XXXSERVICEACCOUNTXXX/ns-admin/g; s/XXXNAMESPACEXXX/amlight/g" rbac.yaml | kubectl --kubeconfig ~/.kube/config-admin apply -f -
 ```
 
 Now you can create your resources:

@@ -21,6 +21,7 @@ SETTINGS = {
 TEMPLATES = {}
 VMS = {}
 VMS_BY_NAME = {}
+VMS_BY_NAME_LOCK = asyncio.Lock()
 
 async def sh(cmd):
     proc = await asyncio.create_subprocess_shell(
@@ -160,11 +161,13 @@ async def cleanup_fn(logger, **kwargs):
 @kopf.on.create("amlight.net", "v1", "vboxvms")
 async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
     logger.info("Create body: %s" % (body))
-    if not (name := await get_available_vm_name()):
-        patch.status["phase"] = "Failed"
-        patch.status["detail"] = "Maximum number of VBox VMs exceeded"
-        raise kopf.PermanentError("Maximum number of VMs exceeded.")
     uid = body["metadata"]["uid"]
+    async with VMS_BY_NAME_LOCK:
+        if not (name := await get_available_vm_name()):
+            patch.status["phase"] = "Failed"
+            patch.status["detail"] = "Maximum number of VBox VMs exceeded"
+            raise kopf.PermanentError("Maximum number of VMs exceeded.")
+        VMS_BY_NAME[name] = uid
     image = body["spec"]["image"]
     image_name, image_tag = image.split(":") if ":" in image else (image, "latest")
     if image_tag not in TEMPLATES.get(image_name, []):
@@ -177,9 +180,10 @@ async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
     except Exception as exc:
         logger.info(f"Failed to create VM: {exc}. Force delete")
         await delete_vm(name)
+        async with VMS_BY_NAME_LOCK:
+            del VMS_BY_NAME[vm["name"]]
         raise kopf.TemporaryError("Failed to create VM. Retrying later..")
     VMS[uid] = {"body": body, "name": name}
-    VMS_BY_NAME[name] = uid
     patch.status['phase'] = 'Pending'
     patch.spec["ip"] = "<none>"
     logger.info("returning status")
@@ -192,7 +196,8 @@ async def delete(body, patch, logger, **kwargs):
     uid = body["metadata"]["uid"]
     if vm := VMS.get(uid):
         await delete_vm(vm["name"])
-        del VMS_BY_NAME[vm["name"]]
+        async with VMS_BY_NAME_LOCK:
+            del VMS_BY_NAME[vm["name"]]
         del VMS[uid]
     else:
         logger.info(f"VM not found! uid={uid} VMs={VMS}")
