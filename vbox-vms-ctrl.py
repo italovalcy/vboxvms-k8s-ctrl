@@ -73,14 +73,15 @@ async def delete_vm(name):
     await sh(f"vboxmanage unregistervm {name} --delete-all")
 
 
-async def create_vm(name, uid, image_name, image_tag):
-    output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --options=link --snapshot={image_tag}")
+async def create_vm(namespace, name, uid, image_name, image_tag):
+    #output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --options=link --snapshot={image_tag}")
+    output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --snapshot={image_tag}")
     if ret != 0:
         raise ValueError(f"Failed to create VM {output}")
 
     vrdeport = 5000 + int(name.strip(NAME_PFX))
     now = int(time.time())
-    output, ret = await sh(f"vboxmanage modifyvm {name} --vrdemulticon on --vrdeport {vrdeport} --description='X-VBOX-CTL-uid={uid};X-VBOX-CTL-createdat={now}'")
+    output, ret = await sh(f"vboxmanage modifyvm {name} --vrdemulticon on --vrdeport {vrdeport} --description='X-VBOX-CTL-uid={uid};X-VBOX-CTL-namespace={namespace};X-VBOX-CTL-name={name};X-VBOX-CTL-createdat={now}'")
     if ret != 0:
         raise ValueError(f"Failed to modify VM {output}")
 
@@ -176,7 +177,7 @@ async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
         patch.status["detail"] = msg
         raise kopf.PermanentError(msg)
     try:
-        await create_vm(name, uid, image_name, image_tag)
+        await create_vm(namespace, name, uid, image_name, image_tag)
     except Exception as exc:
         logger.info(f"Failed to create VM: {exc}. Force delete")
         await delete_vm(name)
@@ -215,6 +216,7 @@ async def check_status(body, status, patch, logger, **kwargs):
         if vm := VMS.get(uid):
             ip = await get_vm_ip(vm["name"], logger)
             if ip:
+                logger.info(f"Found IP for VM name={vm['name']} ip={ip}")
                 patch.spec["ip"] = ip
                 patch.status["phase"] = "Running"
                 break

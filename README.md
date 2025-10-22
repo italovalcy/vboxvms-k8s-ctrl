@@ -28,3 +28,24 @@ Now you can create your resources:
 ```
 kubectl apply -f test-vboxvms.yaml
 ```
+
+## Important considerations
+
+### Source NAT for Pod network
+
+When using Kubernetes with Calico as the Container Network Interface (CNI) plugin, please be advised that by default Calico applies Source NAT for IP address leaving the cluster network context. In practice, that means Pod IP addresses will be translated into the nearest IP address of the VirtualBox's internal network used for VMs -- usually `vboxnet0` -- for instance `192.168.56.1`, which makes it difficult to apply VXLAN/L2TP tunnels and access control rules on the VMs. In order to configure Calico to not apply NAT to certain networks such as the virtualbox internal network, you can apply the following config to your Kubernetes cluster:
+
+```
+cat >config-calico-no-nat-192.168.56.0.yaml <<<EOF
+apiVersion: projectcalico.org/v3
+kind: IPPool
+metadata:
+  name: no-nat-192.168.56.0-24
+spec:
+  cidr: 192.168.56.0/24
+  disabled: true
+  natOutgoing: false
+EOF
+
+kubectl --kubeconfig ~/.kube/config-admin -n calico-system apply -f config-calico-no-nat-192.168.56.0.yaml
+```
