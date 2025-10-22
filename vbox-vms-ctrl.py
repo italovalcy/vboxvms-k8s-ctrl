@@ -106,7 +106,7 @@ async def startup_fn_simple(logger, **kwargs):
     output, ret = await sh(f"vboxmanage list vms")
     if ret != 0:
         raise ValueError(f"Failed to list VMs ret={ret} output={output}")
-    output, ret = await sh(f"test -z $VBOXVMSCTL_TEMPLATES_DIR || for vm in $(ls -1 $VBOXVMSCTL_TEMPLATES_DIR); do vboxmanage registervm $VBOXVMSCTL_TEMPLATES_DIR/$vm/$vm.vbox; done")
+    output, ret = await sh(f'test -z "$VBOXVMSCTL_TEMPLATES_DIR" || for vm in $(ls -1 "$VBOXVMSCTL_TEMPLATES_DIR"); do vboxmanage registervm "$VBOXVMSCTL_TEMPLATES_DIR/$vm/$vm.vbox"; done')
     if ret != 0:
         raise ValueError(f"Failed to import VM templates ret={ret} output={output}")
     output, ret = await sh(f"vboxmanage list vms")
