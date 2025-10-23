@@ -73,21 +73,25 @@ async def delete_vm(name):
     await sh(f"vboxmanage unregistervm {name} --delete-all")
 
 
-async def create_vm(name, namespace, vboxvm_name, uid, image_name, image_tag):
-    #output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --options=link --snapshot={image_tag}")
-    output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --snapshot={image_tag}")
+async def create_vm(name, namespace, vboxvm_name, uid, image_name, image_tag, logger):
+    logger.info(f"create_vm: Clone VM uid={uid}")
+    output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --options=link --snapshot={image_tag}")
+    #output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --snapshot={image_tag}")
     if ret != 0:
         raise ValueError(f"Failed to create VM {output}")
 
     vrdeport = 5000 + int(name.strip(NAME_PFX))
     now = int(time.time())
+    logger.info(f"create_vm: Modify VM uid={uid}")
     output, ret = await sh(f"vboxmanage modifyvm {name} --vrdemulticon on --vrdeport {vrdeport} --description='X-VBOX-CTL-uid={uid};X-VBOX-CTL-namespace={namespace};X-VBOX-CTL-name={vboxvm_name};X-VBOX-CTL-createdat={now}'")
     if ret != 0:
         raise ValueError(f"Failed to modify VM {output}")
 
+    logger.info(f"create_vm: Start VM uid={uid}")
     output, ret = await sh(f"vboxmanage startvm --type headless {name}")
     if ret != 0:
         raise ValueError(f"Failed to start VM {output}")
+    logger.info(f"create_vm: Done VM uid={uid}")
 
 
 @kopf.on.startup()
@@ -178,7 +182,7 @@ async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
         raise kopf.PermanentError(msg)
     try:
         async with VMS_BY_NAME_LOCK:
-            await create_vm(vm_name, namespace, name, uid, image_name, image_tag)
+            await create_vm(vm_name, namespace, name, uid, image_name, image_tag, logger)
     except Exception as exc:
         logger.info(f"Failed to create VM: {exc}. Force delete")
         async with VMS_BY_NAME_LOCK:
@@ -197,8 +201,8 @@ async def delete(body, patch, logger, **kwargs):
     logger.info("Delete body: %s" % (body))
     uid = body["metadata"]["uid"]
     if vm := VMS.get(uid):
-        await delete_vm(vm["name"])
         async with VMS_BY_NAME_LOCK:
+            await delete_vm(vm["name"])
             del VMS_BY_NAME[vm["name"]]
         del VMS[uid]
     else:
@@ -218,6 +222,8 @@ async def check_status(body, status, patch, logger, **kwargs):
         logger.info(f"Timeout waiting for VM creation! uid={uid} body={body}")
         patch.status["phase"] = "Failed"
         return
+
+    logger.info(f"VM created! Checking status.. uid={uid}")
 
     start = time.time()
     while time.time() - start <= SETTINGS["max_wait"]:
