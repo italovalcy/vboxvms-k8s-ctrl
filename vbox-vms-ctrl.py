@@ -73,7 +73,7 @@ async def delete_vm(name):
     await sh(f"vboxmanage unregistervm {name} --delete-all")
 
 
-async def create_vm(namespace, name, uid, image_name, image_tag):
+async def create_vm(name, namespace, vboxvm_name, uid, image_name, image_tag):
     #output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --options=link --snapshot={image_tag}")
     output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --snapshot={image_tag}")
     if ret != 0:
@@ -81,7 +81,7 @@ async def create_vm(namespace, name, uid, image_name, image_tag):
 
     vrdeport = 5000 + int(name.strip(NAME_PFX))
     now = int(time.time())
-    output, ret = await sh(f"vboxmanage modifyvm {name} --vrdemulticon on --vrdeport {vrdeport} --description='X-VBOX-CTL-uid={uid};X-VBOX-CTL-namespace={namespace};X-VBOX-CTL-name={name};X-VBOX-CTL-createdat={now}'")
+    output, ret = await sh(f"vboxmanage modifyvm {name} --vrdemulticon on --vrdeport {vrdeport} --description='X-VBOX-CTL-uid={uid};X-VBOX-CTL-namespace={namespace};X-VBOX-CTL-name={vboxvm_name};X-VBOX-CTL-createdat={now}'")
     if ret != 0:
         raise ValueError(f"Failed to modify VM {output}")
 
@@ -164,11 +164,11 @@ async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
     logger.info("Create body: %s" % (body))
     uid = body["metadata"]["uid"]
     async with VMS_BY_NAME_LOCK:
-        if not (name := await get_available_vm_name()):
+        if not (vm_name := await get_available_vm_name()):
             patch.status["phase"] = "Failed"
             patch.status["detail"] = "Maximum number of VBox VMs exceeded"
             raise kopf.PermanentError("Maximum number of VMs exceeded.")
-        VMS_BY_NAME[name] = uid
+        VMS_BY_NAME[vm_name] = uid
     image = body["spec"]["image"]
     image_name, image_tag = image.split(":") if ":" in image else (image, "latest")
     if image_tag not in TEMPLATES.get(image_name, []):
@@ -177,14 +177,15 @@ async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
         patch.status["detail"] = msg
         raise kopf.PermanentError(msg)
     try:
-        await create_vm(namespace, name, uid, image_name, image_tag)
+        async with VMS_BY_NAME_LOCK:
+            await create_vm(vm_name, namespace, name, uid, image_name, image_tag)
     except Exception as exc:
         logger.info(f"Failed to create VM: {exc}. Force delete")
-        await delete_vm(name)
         async with VMS_BY_NAME_LOCK:
+            await delete_vm(vm_name)
             del VMS_BY_NAME[vm["name"]]
         raise kopf.TemporaryError("Failed to create VM. Retrying later..")
-    VMS[uid] = {"body": body, "name": name}
+    VMS[uid] = {"body": body, "name": vm_name}
     patch.status['phase'] = 'Pending'
     patch.spec["ip"] = "<none>"
     logger.info("returning status")
@@ -208,20 +209,27 @@ async def delete(body, patch, logger, **kwargs):
 async def check_status(body, status, patch, logger, **kwargs):
     logger.info(f"Daemon for checking status body={body}...")
     uid = body["metadata"]["uid"]
+    logger.info(f"Waiting for VM creation.. uid={uid}")
+    for i in range(360):
+        if vm := VMS.get(uid):
+            break
+        await asyncio.sleep(10)
+    else:
+        logger.info(f"Timeout waiting for VM creation! uid={uid} body={body}")
+        patch.status["phase"] = "Failed"
+        return
+
     start = time.time()
     while time.time() - start <= SETTINGS["max_wait"]:
         if status.get("phase", "Pending") != "Pending":
             logger.info(f"Invalid status={status} for body={body}. Aborting...")
             break
-        if vm := VMS.get(uid):
-            ip = await get_vm_ip(vm["name"], logger)
-            if ip:
-                logger.info(f"Found IP for VM name={vm['name']} ip={ip}")
-                patch.spec["ip"] = ip
-                patch.status["phase"] = "Running"
-                break
-        else:
-            logger.info(f"VM not found! uid={uid} VMs={VMS}")
+        ip = await get_vm_ip(vm["name"], logger)
+        if ip:
+            logger.info(f"Found IP for VM name={vm['name']} ip={ip}")
+            patch.spec["ip"] = ip
+            patch.status["phase"] = "Running"
+            break
         await asyncio.sleep(10)
     else:
         logger.info(f"Timeout waiting for VM to be ready! start={start} now={time.time()} uid={uid} body={body}")
