@@ -49,3 +49,37 @@ EOF
 
 kubectl --kubeconfig ~/.kube/config-admin -n calico-system apply -f config-calico-no-nat-192.168.56.0.yaml
 ```
+
+### VirtualBox configs
+
+DHCPServer:
+```
+vboxmanage list dhcpservers
+
+# if you dont find vboxnet0:
+VBoxManage hostonlyif create
+VBoxManage dhcpserver modify --network HostInterfaceNetworking-vboxnet0 --set-opt=3 192.168.56.1
+vboxmanage dhcpserver restart --network HostInterfaceNetworking-vboxnet0
+```
+
+After import VM:
+```
+vboxmanage modifyvm VMNAME --vrdemulticon on --vrdeport 5015 --vrde on --memory 10000 --cpus 4 --vrde-auth-type null
+vboxmanage modifyvm VMNAME --nic1 hostnet --hostnet1 vboxnet0
+```
+
+You can download a pre-built virtualbox image from OSBoxes or VagrantCloud projects (or any other of your choice):
+- Example for OSBoxes: https://www.osboxes.org/debian/#debian-12-11-0-vbox
+- Example for VagrantCloud: https://portal.cloud.hashicorp.com/vagrant/discover/generic/debian12
+
+If you are importing a vdi/vmdk:
+```
+VBoxManage createvm --name template-debian12 --ostype Debian_64 --register
+VBoxManage storagectl template-debian12 --name "SATA Controller" --add sata --controller IntelAhci
+mv debian12-disk.vmdk VirtualBox\ VMs/template-debian12/
+cd VirtualBox\ VMs/template-debian12/
+VBoxManage storageattach template-debian12 --storagectl "SATA Controller" --port 0 --device 0 --type hdd --medium debian12-disk.vmdk
+VBoxManage modifyvm template-debian12 --memory 2048 --vram 128
+VBoxManage modifyvm template-debian12 --nic1 hostnet --hostnet1 vboxnet0
+vboxmanage modifyvm template-debian12 --vrdemulticon on --vrdeport 5015 --vrde on --memory 10000 --cpus 4 --vrde-auth-type null
+```
