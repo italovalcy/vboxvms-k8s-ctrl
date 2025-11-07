@@ -109,11 +109,13 @@ async def startup_fn_simple(logger, **kwargs):
         output, ret = await sh(f"VBoxManage hostonlyif create")
         if ret != 0:
             raise ValueError(f"Failed to create hostonlyif ret={ret} output={output}")
-        # since we had to create the hostonlyif, we will also probably need to setup ipaddr and dhcpserver
-        output, ret = await sh(f"vboxmanage hostonlyif ipconfig vboxnet0 --ip=192.168.56.1 --netmask=255.255.255.0")
-        logger.info(f"Setup ipaddr on hostonlyif, ret={ret} result={output}")
-        output, ret = await sh(f"VBoxManage dhcpserver modify --interface vboxnet0 --set-opt=3 192.168.56.1 --server-ip=192.168.56.100 --lower-ip=192.168.56.101 --upper-ip=192.168.56.254 --netmask=255.255.255.0 --enable")
-        logger.info(f"Setup dhcpserver on hostonlyif, ret={ret} result={output}")
+    logger.info('Hostonlyif vboxnet0 OK')
+    # It seems that after deploying vbox hostonlyif for another user we have to
+    # setup ipaddr and dhcpserver, so that the gateway option is sent to guests
+    output, ret = await sh(f"vboxmanage hostonlyif ipconfig vboxnet0 --ip=192.168.56.1 --netmask=255.255.255.0")
+    logger.info(f"Setup ipaddr on hostonlyif, ret={ret} result={output}")
+    output, ret = await sh(f"VBoxManage dhcpserver modify --interface vboxnet0 --set-opt=3 192.168.56.1 --server-ip=192.168.56.100 --lower-ip=192.168.56.101 --upper-ip=192.168.56.254 --netmask=255.255.255.0 --enable")
+    logger.info(f"Setup dhcpserver on hostonlyif, ret={ret} result={output}")
     logger.info('Checking for VM templates')
     output, ret = await sh(f"vboxmanage list vms")
     if ret != 0:
