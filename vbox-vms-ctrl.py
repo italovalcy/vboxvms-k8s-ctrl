@@ -69,7 +69,10 @@ async def get_vm_ip(name, logger):
 
 
 async def delete_vm(name):
-    await sh(f"vboxmanage controlvm {name} poweroff")
+    await sh(f"timeout 60 vboxmanage controlvm {name} poweroff")
+    await asyncio.sleep(1)
+    await sh(f"pkill -9 -f {name}")
+    await asyncio.sleep(1)
     await sh(f"vboxmanage unregistervm {name} --delete-all")
 
 
