@@ -68,6 +68,26 @@ async def get_vm_ip(name, logger):
     return match.group(1)
 
 
+async def collect_vm_logs(name, logger, tail_lines=100):
+    """Dump VM info and VirtualBox logs to the controller log (for failed VMs)."""
+    output, ret = await sh(f"vboxmanage showvminfo {name} --machinereadable")
+    logger.warning(f"collect_vm_logs: showvminfo {name} ret={ret}:\n{output}")
+    log_dir = None
+    for line in output.splitlines():
+        if line.startswith("LogFldr="):
+            log_dir = line.split("=", 1)[1].strip('"')
+            break
+    if not log_dir:
+        logger.warning(f"collect_vm_logs: log folder not found for {name}")
+        return
+    output, ret = await sh(f"ls -la '{log_dir}'")
+    logger.warning(f"collect_vm_logs: ls {log_dir} ret={ret}:\n{output}")
+    for logname in ("VBoxStartup.log", "VBoxHardening.log", "VBox.log"):
+        output, ret = await sh(f"test -f '{log_dir}/{logname}' && tail -n {tail_lines} '{log_dir}/{logname}'")
+        if ret == 0:
+            logger.warning(f"collect_vm_logs: {logname} (last {tail_lines} lines):\n{output}")
+
+
 async def delete_vm(name):
     await sh(f"timeout 60 vboxmanage controlvm {name} poweroff")
     await asyncio.sleep(1)
@@ -83,7 +103,7 @@ async def create_vm(name, namespace, vboxvm_name, uid, image_name, image_tag, lo
     if ret != 0:
         raise ValueError(f"Failed to create VM {output}")
 
-    vrdeport = 5000 + int(name.strip(NAME_PFX))
+    vrdeport = 5000 + int(name.removeprefix(NAME_PFX))
     now = int(time.time())
     logger.info(f"create_vm: Modify VM uid={uid}")
     output, ret = await sh(f"vboxmanage modifyvm {name} --vrdemulticon on --vrdeport {vrdeport} --description='X-VBOX-CTL-uid={uid};X-VBOX-CTL-namespace={namespace};X-VBOX-CTL-name={vboxvm_name};X-VBOX-CTL-createdat={now}'")
@@ -152,7 +172,7 @@ async def startup_fn_simple(logger, **kwargs):
         for line in output.splitlines():
             if match := pattern_snapshot.match(line):
                 snapshots.append(match.group(1))
-        TEMPLATES[vm["name"].lstrip("template-")] = snapshots
+        TEMPLATES[vm["name"].removeprefix("template-")] = snapshots
     logger.info(f"VM templates: {TEMPLATES}")
     logger.info(f"Started successfully!")
 
@@ -186,6 +206,8 @@ async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
     image = body["spec"]["image"]
     image_name, image_tag = image.split(":") if ":" in image else (image, "latest")
     if image_tag not in TEMPLATES.get(image_name, []):
+        async with VMS_BY_NAME_LOCK:
+            VMS_BY_NAME.pop(vm_name, None)
         patch.status["phase"] = "Failed"
         msg = f"Image name or tag not available. Available VMs/tags: {TEMPLATES}"
         patch.status["detail"] = msg
@@ -196,8 +218,12 @@ async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
     except Exception as exc:
         logger.info(f"Failed to create VM: {exc}. Force delete")
         async with VMS_BY_NAME_LOCK:
+            try:
+                await collect_vm_logs(vm_name, logger)
+            except Exception as log_exc:
+                logger.warning(f"Failed to collect logs for {vm_name}: {log_exc}")
             await delete_vm(vm_name)
-            del VMS_BY_NAME[vm["name"]]
+            VMS_BY_NAME.pop(vm_name, None)
         raise kopf.TemporaryError("Failed to create VM. Retrying later..")
     VMS[uid] = {"body": body, "name": vm_name}
     patch.status['phase'] = 'Pending'
