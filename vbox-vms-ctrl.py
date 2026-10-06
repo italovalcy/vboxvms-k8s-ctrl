@@ -130,6 +130,10 @@ def pid_belongs_to_vm(pid, name):
     return "VBoxHeadless" in args[0] and name in args
 
 
+class VMDeleteError(RuntimeError):
+    pass
+
+
 async def delete_vm(name, pid=None, logger=None):
     await sh(f"timeout 60 vboxmanage controlvm {name} poweroff")
     await asyncio.sleep(1)
@@ -143,7 +147,18 @@ async def delete_vm(name, pid=None, logger=None):
         except ProcessLookupError:
             pass
     await asyncio.sleep(1)
-    await sh(f"vboxmanage unregistervm {name} --delete-all")
+    # unregistervm can fail right after the kill while VBoxSVC still holds the
+    # session lock, so retry a few times before giving up
+    for attempt in range(3):
+        output, ret = await sh(f"vboxmanage unregistervm {name} --delete-all")
+        if ret == 0:
+            return
+        if "Could not find a registered machine" in output:
+            return  # nothing to delete (e.g. clonevm failed before registering)
+        if logger:
+            logger.warning(f"delete_vm: unregistervm {name} attempt={attempt + 1} ret={ret} output={output}")
+        await asyncio.sleep(2)
+    raise VMDeleteError(f"Failed to unregister VM {name}: {output}")
 
 
 async def create_vm(name, namespace, vboxvm_name, uid, image_name, image_tag, logger):
@@ -250,7 +265,11 @@ async def reconcile_orphans(logger):
             continue
         logger.warning(f"reconcile: CR {vm['namespace']}/{vm['cr_name']} uid={uid} is gone, deleting orphan vm={vm['name']}")
         async with VMS_BY_NAME_LOCK:
-            await delete_vm(vm["name"], pid=vm.get("pid"), logger=logger)
+            try:
+                await delete_vm(vm["name"], pid=vm.get("pid"), logger=logger)
+            except VMDeleteError as exc:
+                logger.warning(f"reconcile: {exc}. Keeping vm={vm['name']} reserved")
+                continue
             VMS_BY_NAME.pop(vm["name"], None)
             VMS.pop(uid, None)
 
@@ -380,8 +399,14 @@ async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
                 await collect_vm_logs(vm_name, logger)
             except Exception as log_exc:
                 logger.warning(f"Failed to collect logs for {vm_name}: {log_exc}")
-            await delete_vm(vm_name, logger=logger)
-            VMS_BY_NAME.pop(vm_name, None)
+            try:
+                await delete_vm(vm_name, logger=logger)
+            except VMDeleteError as del_exc:
+                # the VM may still exist on the host, keep the slot reserved so
+                # the name is not reused while it is leaked
+                logger.error(f"{del_exc}. Keeping {vm_name} reserved")
+            else:
+                VMS_BY_NAME.pop(vm_name, None)
         raise kopf.TemporaryError("Failed to create VM. Retrying later..")
     VMS[uid] = {"body": body, "name": vm_name, "pid": pid}
     patch.status['phase'] = 'Pending'
@@ -396,9 +421,12 @@ async def delete(body, patch, logger, **kwargs):
     uid = body["metadata"]["uid"]
     if vm := VMS.get(uid):
         async with VMS_BY_NAME_LOCK:
-            await delete_vm(vm["name"], pid=vm.get("pid"), logger=logger)
-            del VMS_BY_NAME[vm["name"]]
-        del VMS[uid]
+            try:
+                await delete_vm(vm["name"], pid=vm.get("pid"), logger=logger)
+            except VMDeleteError as exc:
+                raise kopf.TemporaryError(str(exc), delay=15)
+            VMS_BY_NAME.pop(vm["name"], None)
+        VMS.pop(uid, None)
     else:
         logger.info(f"VM not found! uid={uid} VMs={VMS}")
     patch.status['phase'] = 'Succeeded'
