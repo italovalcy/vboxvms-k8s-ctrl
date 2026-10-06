@@ -1,18 +1,25 @@
 FROM python:3.11-bookworm
 
-RUN export DEBIAN_FRONTEND=noninteractive \
- && apt-get update && apt-get install -y curl gpg fasttrack-archive-keyring iproute2 sudo \
- && echo "deb https://fasttrack.debian.net/debian-fasttrack/ bookworm-fasttrack main contrib" | tee /etc/apt/sources.list.d/fasttrack.list \
- && echo "deb https://fasttrack.debian.net/debian-fasttrack/ bookworm-backports-staging main contrib" | tee -a /etc/apt/sources.list.d/fasttrack.list \
- && rm -rf /var/lib/apt/lists/*
-# && curl -L https://www.virtualbox.org/download/oracle_vbox_2016.asc \
-#     | gpg --yes --output /usr/share/keyrings/oracle-virtualbox-2016.gpg --dearmor \
-# && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/oracle-virtualbox-2016.gpg] https://download.virtualbox.org/virtualbox/debian bookworm contrib" \
-#      | tee -a /etc/apt/sources.list.d/virtualbox.list \
+# The VirtualBox userspace version MUST match the vboxdrv kernel module loaded
+# on the host (see /sys/module/vboxdrv/version), otherwise VBoxHeadless fails
+# with rc=-1912 (driver version mismatch). Keep these in sync with the host.
+ARG VBOX_VERSION=7.1.18
+ARG VBOX_BUILD=173720
 
 RUN export DEBIAN_FRONTEND=noninteractive \
- && echo virtualbox-ext-pack virtualbox-ext-pack/license select true | debconf-set-selections \
- && apt-get update && apt-get install -y --no-install-recommends kmod virtualbox virtualbox-ext-pack \
+ && apt-get update && apt-get install -y curl gpg iproute2 sudo kmod \
+ && curl -fsSL https://www.virtualbox.org/download/oracle_vbox_2016.asc \
+     | gpg --yes --output /usr/share/keyrings/oracle-virtualbox-2016.gpg --dearmor \
+ && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/oracle-virtualbox-2016.gpg] https://download.virtualbox.org/virtualbox/debian bookworm contrib" \
+     > /etc/apt/sources.list.d/virtualbox.list \
+ && apt-get update && apt-get install -y --no-install-recommends \
+     virtualbox-7.1=${VBOX_VERSION}-${VBOX_BUILD}~Debian~bookworm \
+ && curl -fsSL -o /tmp/extpack.vbox-extpack \
+     https://download.virtualbox.org/virtualbox/${VBOX_VERSION}/Oracle_VirtualBox_Extension_Pack-${VBOX_VERSION}.vbox-extpack \
+ && VBoxManage extpack install --replace \
+     --accept-license=$(tar -xzOf /tmp/extpack.vbox-extpack ./ExtPack-license.txt | sha256sum | cut -d' ' -f1) \
+     /tmp/extpack.vbox-extpack \
+ && rm -f /tmp/extpack.vbox-extpack \
  && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 1000 vboxvmsctl \

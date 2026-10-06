@@ -77,6 +77,17 @@ async def collect_vm_logs(name, logger, tail_lines=100):
         if line.startswith("LogFldr="):
             log_dir = line.split("=", 1)[1].strip('"')
             break
+    # VM-level logs may not exist if the VM process died very early, so also
+    # collect host/driver level diagnostics
+    output, ret = await sh(
+        "echo '--- version'; vboxmanage --version; "
+        "echo '--- /dev/vbox*'; ls -l /dev/vbox* 2>&1; "
+        "echo '--- lsmod'; lsmod 2>&1 | grep -i vbox; "
+        "echo '--- vboxmanage list hostonlyifs'; vboxmanage list hostonlyifs 2>&1 | head -20; "
+        "echo '--- vmdir'; ls -la \"$(dirname '" + (log_dir or "/nonexistent") + "')\" 2>&1; "
+        "echo '--- VBoxSVC.log'; tail -n 50 \"${VBOX_USER_HOME:-$HOME/.config/VirtualBox}/VBoxSVC.log\" 2>&1"
+    )
+    logger.warning(f"collect_vm_logs: host diagnostics:\n{output}")
     if not log_dir:
         logger.warning(f"collect_vm_logs: log folder not found for {name}")
         return
