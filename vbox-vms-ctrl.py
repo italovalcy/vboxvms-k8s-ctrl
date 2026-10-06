@@ -14,7 +14,6 @@ import yaml
 
 
 # TODO:
-# - check if vms are running
 # - check for vbox hostonlyif (on startup)
 # - periodically check for VMS (on startup)
 
@@ -92,6 +91,21 @@ async def get_vm_ip(name, logger):
         return
 
     return match.group(1)
+
+
+# VirtualBox VM states in which the guest is not (or no longer) executing
+VM_DEAD_STATES = {"poweroff", "aborted", "saved", "aborted-saved", "gurumeditation", "missing"}
+
+
+async def get_vm_state(name):
+    """Return the VBox VMState of a VM, 'missing' if unregistered, None if unknown."""
+    output, ret = await sh(f"vboxmanage showvminfo {name} --machinereadable", timeout=30)
+    if ret != 0:
+        return "missing" if "Could not find a registered machine" in output else None
+    for line in output.splitlines():
+        if line.startswith("VMState="):
+            return line.split("=", 1)[1].strip('"')
+    return None
 
 
 async def collect_vm_logs(name, logger, tail_lines=100):
@@ -483,3 +497,27 @@ async def check_status(body, status, patch, logger, **kwargs):
     else:
         logger.info(f"Timeout waiting for VM to be ready! start={start} now={time.time()} uid={uid} body={body}")
         patch.status["phase"] = "Failed"
+
+
+@kopf.timer("amlight.net", "v1", "vboxvms", interval=30, initial_delay=60)
+async def check_vm_running(body, patch, logger, **kwargs):
+    """Periodically verify that VMs of Pending/Running resources are still up."""
+    uid = body["metadata"]["uid"]
+    phase = body.get("status", {}).get("phase")
+    if phase not in ("Pending", "Running"):
+        return
+    if not (vm := VMS.get(uid)):
+        return  # not created yet (or already deleted)
+    state = await get_vm_state(vm["name"])
+    if state is None:
+        logger.warning(f"Could not determine state of vm={vm['name']} uid={uid}")
+        return
+    if state not in VM_DEAD_STATES:
+        return
+    logger.error(f"VM is not running! vm={vm['name']} uid={uid} state={state}")
+    try:
+        await collect_vm_logs(vm["name"], logger)
+    except Exception as exc:
+        logger.warning(f"Failed to collect logs for {vm['name']}: {exc}")
+    patch.status["phase"] = "Failed"
+    patch.status["detail"] = f"VM {vm['name']} is not running (state={state})"
