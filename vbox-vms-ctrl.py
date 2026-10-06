@@ -1,5 +1,7 @@
 import asyncio
+import os
 import pprint
+import signal
 import time
 import random
 import re
@@ -99,10 +101,44 @@ async def collect_vm_logs(name, logger, tail_lines=100):
             logger.warning(f"collect_vm_logs: {logname} (last {tail_lines} lines):\n{output}")
 
 
-async def delete_vm(name):
+async def get_vm_pid(name):
+    """Find the VBoxHeadless PID of a VM by exact name (None if not running).
+
+    Uses exec (no shell) so pgrep cannot match its own parent shell, and anchors
+    the pattern so that 'vbox-vm-1' does not match 'vbox-vm-10'.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "pgrep", "-f", f"VBoxHeadless --comment {re.escape(name)} --startvm",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout_data, _ = await proc.communicate()
+    pids = stdout_data.decode().split()
+    return int(pids[0]) if pids else None
+
+
+def pid_belongs_to_vm(pid, name):
+    """Guard against PID reuse: check the process is still this VM's VBoxHeadless."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            args = f.read().decode(errors="replace").split("\0")
+    except OSError:
+        return False
+    return "VBoxHeadless" in args[0] and name in args
+
+
+async def delete_vm(name, pid=None, logger=None):
     await sh(f"timeout 60 vboxmanage controlvm {name} poweroff")
     await asyncio.sleep(1)
-    await sh(f"pkill -9 -f {name}")
+    if pid is None or not pid_belongs_to_vm(pid, name):
+        pid = await get_vm_pid(name)
+    if pid is not None:
+        if logger:
+            logger.info(f"delete_vm: killing VBoxHeadless pid={pid} vm={name}")
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     await asyncio.sleep(1)
     await sh(f"vboxmanage unregistervm {name} --delete-all")
 
@@ -125,7 +161,43 @@ async def create_vm(name, namespace, vboxvm_name, uid, image_name, image_tag, lo
     output, ret = await sh(f"vboxmanage startvm --type headless {name}")
     if ret != 0:
         raise ValueError(f"Failed to start VM {output}")
-    logger.info(f"create_vm: Done VM uid={uid}")
+    pid = await get_vm_pid(name)
+    if pid is None:
+        logger.warning(f"create_vm: could not find VBoxHeadless pid for {name}")
+    logger.info(f"create_vm: Done VM uid={uid} pid={pid}")
+    return pid
+
+
+async def rebuild_state(vm_names, logger):
+    """Repopulate VMS/VMS_BY_NAME from VMs already registered in VirtualBox.
+
+    The CR uid is recovered from the X-VBOX-CTL-uid marker in the VM description.
+    VMs with our name prefix but no readable marker are still reserved in
+    VMS_BY_NAME so their slot is not handed out (and the VM not deleted) by a
+    new create.
+    """
+    for vm_name in vm_names:
+        if not vm_name.startswith(NAME_PFX):
+            continue
+        output, ret = await sh(f"vboxmanage showvminfo {vm_name} --machinereadable")
+        if ret != 0:
+            logger.warning(f"rebuild_state: failed to get info for {vm_name} ret={ret} output={output}")
+            VMS_BY_NAME[vm_name] = None
+            continue
+        uid = None
+        for line in output.splitlines():
+            if line.startswith("description="):
+                if match := re.search(r"X-VBOX-CTL-uid=([^;\"]+)", line):
+                    uid = match.group(1)
+                break
+        pid = await get_vm_pid(vm_name)
+        if not uid:
+            logger.warning(f"rebuild_state: no X-VBOX-CTL-uid for {vm_name}, reserving the name only")
+            VMS_BY_NAME[vm_name] = None
+            continue
+        VMS_BY_NAME[vm_name] = uid
+        VMS[uid] = {"body": None, "name": vm_name, "pid": pid}
+        logger.info(f"rebuild_state: recovered vm={vm_name} uid={uid} pid={pid}")
 
 
 @kopf.on.startup()
@@ -162,8 +234,12 @@ async def startup_fn_simple(logger, **kwargs):
     for line in output.splitlines():
         if match := pattern.match(line):
             vms.append(match.groupdict())
+    await rebuild_state([vm["name"] for vm in vms], logger)
+    logger.info(f"Recovered state: VMS_BY_NAME={VMS_BY_NAME}")
     pattern_snapshot = re.compile(r'\s*Name:\s+([^\s]+)\s+')
     for vm in vms:
+        if vm["name"].startswith(NAME_PFX):
+            continue
         if not vm["name"].startswith("template-"):
             logger.warning(f"VM name does not starts with 'template-', ignoring! vm={vm['name']}")
             continue
@@ -225,7 +301,7 @@ async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
         raise kopf.PermanentError(msg)
     try:
         async with VMS_BY_NAME_LOCK:
-            await create_vm(vm_name, namespace, name, uid, image_name, image_tag, logger)
+            pid = await create_vm(vm_name, namespace, name, uid, image_name, image_tag, logger)
     except Exception as exc:
         logger.info(f"Failed to create VM: {exc}. Force delete")
         async with VMS_BY_NAME_LOCK:
@@ -233,10 +309,10 @@ async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
                 await collect_vm_logs(vm_name, logger)
             except Exception as log_exc:
                 logger.warning(f"Failed to collect logs for {vm_name}: {log_exc}")
-            await delete_vm(vm_name)
+            await delete_vm(vm_name, logger=logger)
             VMS_BY_NAME.pop(vm_name, None)
         raise kopf.TemporaryError("Failed to create VM. Retrying later..")
-    VMS[uid] = {"body": body, "name": vm_name}
+    VMS[uid] = {"body": body, "name": vm_name, "pid": pid}
     patch.status['phase'] = 'Pending'
     patch.spec["ip"] = "<none>"
     logger.info("returning status")
@@ -249,7 +325,7 @@ async def delete(body, patch, logger, **kwargs):
     uid = body["metadata"]["uid"]
     if vm := VMS.get(uid):
         async with VMS_BY_NAME_LOCK:
-            await delete_vm(vm["name"])
+            await delete_vm(vm["name"], pid=vm.get("pid"), logger=logger)
             del VMS_BY_NAME[vm["name"]]
         del VMS[uid]
     else:
