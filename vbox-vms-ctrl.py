@@ -28,14 +28,35 @@ VMS = {}
 VMS_BY_NAME = {}
 VMS_BY_NAME_LOCK = asyncio.Lock()
 
-async def sh(cmd):
+SH_TIMEOUT = 120
+SH_TIMEOUT_EXIT = 124  # same as timeout(1)
+
+
+async def sh(cmd, timeout=SH_TIMEOUT):
+    """Run a shell command, returning (output, returncode).
+
+    The command runs in its own process group and the whole group is killed on
+    timeout (or cancellation), so a hung vboxmanage cannot block callers (some
+    of which hold VMS_BY_NAME_LOCK) forever. On timeout returncode is 124.
+    """
     proc = await asyncio.create_subprocess_shell(
         cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT  # Redirect stderr to stdout
+        stderr=asyncio.subprocess.STDOUT,  # Redirect stderr to stdout
+        start_new_session=True,
     )
-    stdout_data, stderr_data = await proc.communicate()
-    return stdout_data.decode().strip(), proc.returncode
+    try:
+        stdout_data, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        return f"Timed out after {timeout}s: {cmd}", SH_TIMEOUT_EXIT
+    return stdout_data.decode(errors="replace").strip(), proc.returncode
 
 
 async def update_settings(body):
@@ -150,7 +171,7 @@ async def delete_vm(name, pid=None, logger=None):
     # unregistervm can fail right after the kill while VBoxSVC still holds the
     # session lock, so retry a few times before giving up
     for attempt in range(3):
-        output, ret = await sh(f"vboxmanage unregistervm {name} --delete-all")
+        output, ret = await sh(f"vboxmanage unregistervm {name} --delete-all", timeout=300)
         if ret == 0:
             return
         if "Could not find a registered machine" in output:
@@ -163,7 +184,7 @@ async def delete_vm(name, pid=None, logger=None):
 
 async def create_vm(name, namespace, vboxvm_name, uid, image_name, image_tag, logger):
     logger.info(f"create_vm: Clone VM uid={uid}")
-    output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --options=link --snapshot={image_tag}")
+    output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --options=link --snapshot={image_tag}", timeout=300)
     #output, ret = await sh(f"vboxmanage clonevm template-{image_name} --name={name} --register --snapshot={image_tag}")
     if ret != 0:
         raise ValueError(f"Failed to create VM {output}")
