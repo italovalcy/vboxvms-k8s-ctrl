@@ -351,21 +351,25 @@ async def cleanup_fn(logger, **kwargs):
 async def create(body, meta, spec, patch, logger, name, namespace, **kwargs):
     logger.info("Create body: %s" % (body))
     uid = body["metadata"]["uid"]
+    image = spec.get("image")
+    if not isinstance(image, str) or not image:
+        msg = "spec.image is required"
+        patch.status["phase"] = "Failed"
+        patch.status["detail"] = msg
+        raise kopf.PermanentError(msg)
+    image_name, _, image_tag = image.partition(":")
+    image_tag = image_tag or "latest"
+    if image_tag not in TEMPLATES.get(image_name, []):
+        patch.status["phase"] = "Failed"
+        msg = f"Image name or tag not available. Available VMs/tags: {TEMPLATES}"
+        patch.status["detail"] = msg
+        raise kopf.PermanentError(msg)
     async with VMS_BY_NAME_LOCK:
         if not (vm_name := await get_available_vm_name()):
             patch.status["phase"] = "Failed"
             patch.status["detail"] = "Maximum number of VBox VMs exceeded"
             raise kopf.PermanentError("Maximum number of VMs exceeded.")
         VMS_BY_NAME[vm_name] = uid
-    image = body["spec"]["image"]
-    image_name, image_tag = image.split(":") if ":" in image else (image, "latest")
-    if image_tag not in TEMPLATES.get(image_name, []):
-        async with VMS_BY_NAME_LOCK:
-            VMS_BY_NAME.pop(vm_name, None)
-        patch.status["phase"] = "Failed"
-        msg = f"Image name or tag not available. Available VMs/tags: {TEMPLATES}"
-        patch.status["detail"] = msg
-        raise kopf.PermanentError(msg)
     try:
         async with VMS_BY_NAME_LOCK:
             pid = await create_vm(vm_name, namespace, name, uid, image_name, image_tag, logger)
