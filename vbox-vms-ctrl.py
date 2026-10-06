@@ -5,6 +5,7 @@ import signal
 import time
 import random
 import re
+import shlex
 import ssl
 
 import aiohttp
@@ -277,9 +278,20 @@ async def startup_fn_simple(logger, **kwargs):
     output, ret = await sh(f"vboxmanage list vms")
     if ret != 0:
         raise ValueError(f"Failed to list VMs ret={ret} output={output}")
-    output, ret = await sh(f'test -z "$VBOXVMSCTL_TEMPLATES_DIR" || for vm in $(ls -1 "$VBOXVMSCTL_TEMPLATES_DIR"); do vboxmanage registervm "$VBOXVMSCTL_TEMPLATES_DIR/$vm/$vm.vbox"; done')
-    if ret != 0:
-        raise ValueError(f"Failed to import VM templates ret={ret} output={output}")
+    registered = set(re.findall(r'^"([^"]+)"', output, re.MULTILINE))
+    if templates_dir := os.environ.get("VBOXVMSCTL_TEMPLATES_DIR"):
+        for vm in sorted(os.listdir(templates_dir)):
+            vbox_file = os.path.join(templates_dir, vm, f"{vm}.vbox")
+            if vm in registered:
+                continue
+            if not os.path.isfile(vbox_file):
+                logger.warning(f"Template file not found, ignoring: {vbox_file}")
+                continue
+            reg_output, reg_ret = await sh(f"vboxmanage registervm {shlex.quote(vbox_file)}")
+            if reg_ret != 0:
+                logger.warning(f"Failed to register VM template {vbox_file} ret={reg_ret} output={reg_output}")
+            else:
+                logger.info(f"Registered VM template {vbox_file}")
     output, ret = await sh(f"vboxmanage list vms")
     if ret != 0:
         raise ValueError(f"Failed to list VMs ret={ret} output={output}")
