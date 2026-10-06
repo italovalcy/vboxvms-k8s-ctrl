@@ -5,7 +5,9 @@ import signal
 import time
 import random
 import re
+import ssl
 
+import aiohttp
 import kopf
 import yaml
 
@@ -168,13 +170,46 @@ async def create_vm(name, namespace, vboxvm_name, uid, image_name, image_tag, lo
     return pid
 
 
+async def get_cr_state(namespace, name, uid, logger):
+    """Check a CR against the API: 'present' (same uid), 'gone' or 'unknown'.
+
+    Only 404 or a different uid count as 'gone'; any other failure is 'unknown'
+    so an API outage or RBAC problem never causes VMs to be deleted.
+    """
+    sa_dir = "/var/run/secrets/kubernetes.io/serviceaccount"
+    host = os.environ.get("KUBERNETES_SERVICE_HOST")
+    port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+    if not host:
+        logger.warning("reconcile: not running in-cluster, skipping CR check")
+        return "unknown"
+    try:
+        with open(f"{sa_dir}/token") as f:
+            token = f.read().strip()
+        ctx = ssl.create_default_context(cafile=f"{sa_dir}/ca.crt")
+        hostport = f"[{host}]" if ":" in host else host
+        url = f"https://{hostport}:{port}/apis/amlight.net/v1/namespaces/{namespace}/vboxvms/{name}"
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, ssl=ctx, headers={"Authorization": f"Bearer {token}"}) as resp:
+                if resp.status == 404:
+                    return "gone"
+                if resp.status != 200:
+                    logger.warning(f"reconcile: unexpected status {resp.status} for {namespace}/{name}")
+                    return "unknown"
+                data = await resp.json()
+    except Exception as exc:
+        logger.warning(f"reconcile: failed to query CR {namespace}/{name}: {exc!r}")
+        return "unknown"
+    return "present" if data.get("metadata", {}).get("uid") == uid else "gone"
+
+
 async def rebuild_state(vm_names, logger):
     """Repopulate VMS/VMS_BY_NAME from VMs already registered in VirtualBox.
 
-    The CR uid is recovered from the X-VBOX-CTL-uid marker in the VM description.
-    VMs with our name prefix but no readable marker are still reserved in
-    VMS_BY_NAME so their slot is not handed out (and the VM not deleted) by a
-    new create.
+    The CR uid/namespace/name are recovered from the X-VBOX-CTL-* markers in the
+    VM description. VMs with our name prefix but no readable marker are still
+    reserved in VMS_BY_NAME so their slot is not handed out (and the VM not
+    deleted) by a new create.
     """
     for vm_name in vm_names:
         if not vm_name.startswith(NAME_PFX):
@@ -184,20 +219,39 @@ async def rebuild_state(vm_names, logger):
             logger.warning(f"rebuild_state: failed to get info for {vm_name} ret={ret} output={output}")
             VMS_BY_NAME[vm_name] = None
             continue
-        uid = None
+        markers = {}
         for line in output.splitlines():
             if line.startswith("description="):
-                if match := re.search(r"X-VBOX-CTL-uid=([^;\"]+)", line):
-                    uid = match.group(1)
+                markers = dict(re.findall(r"X-VBOX-CTL-(\w+)=([^;\"]*)", line))
                 break
+        uid = markers.get("uid")
         pid = await get_vm_pid(vm_name)
         if not uid:
             logger.warning(f"rebuild_state: no X-VBOX-CTL-uid for {vm_name}, reserving the name only")
             VMS_BY_NAME[vm_name] = None
             continue
         VMS_BY_NAME[vm_name] = uid
-        VMS[uid] = {"body": None, "name": vm_name, "pid": pid}
+        VMS[uid] = {
+            "body": None, "name": vm_name, "pid": pid,
+            "namespace": markers.get("namespace"), "cr_name": markers.get("name"),
+        }
         logger.info(f"rebuild_state: recovered vm={vm_name} uid={uid} pid={pid}")
+
+
+async def reconcile_orphans(logger):
+    """Delete recovered VMs whose CR no longer exists (deleted while we were down)."""
+    for uid, vm in list(VMS.items()):
+        if not vm.get("namespace") or not vm.get("cr_name"):
+            logger.warning(f"reconcile: no namespace/name marker for vm={vm['name']}, keeping it")
+            continue
+        state = await get_cr_state(vm["namespace"], vm["cr_name"], uid, logger)
+        if state != "gone":
+            continue
+        logger.warning(f"reconcile: CR {vm['namespace']}/{vm['cr_name']} uid={uid} is gone, deleting orphan vm={vm['name']}")
+        async with VMS_BY_NAME_LOCK:
+            await delete_vm(vm["name"], pid=vm.get("pid"), logger=logger)
+            VMS_BY_NAME.pop(vm["name"], None)
+            VMS.pop(uid, None)
 
 
 @kopf.on.startup()
@@ -235,6 +289,7 @@ async def startup_fn_simple(logger, **kwargs):
         if match := pattern.match(line):
             vms.append(match.groupdict())
     await rebuild_state([vm["name"] for vm in vms], logger)
+    await reconcile_orphans(logger)
     logger.info(f"Recovered state: VMS_BY_NAME={VMS_BY_NAME}")
     pattern_snapshot = re.compile(r'\s*Name:\s+([^\s]+)\s+')
     for vm in vms:
